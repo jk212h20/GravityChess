@@ -19,6 +19,11 @@ export type Board = BoardCell[][];
 
 export interface GameState {
   board: Board;
+  preGravityBoard: Board | null; // board after raw move, before gravity
+  lastMoveFromR: number;
+  lastMoveFromC: number;
+  lastMoveToR: number;
+  lastMoveToC: number;
   turn: Player;
   moveLog: Move[];
   status: GameStatus;
@@ -111,6 +116,11 @@ export function applyGravity(board: Board): Board {
 export function createGame(): GameState {
   return {
     board: makeStartingBoard(),
+    preGravityBoard: null,
+    lastMoveFromR: -1,
+    lastMoveFromC: -1,
+    lastMoveToR: -1,
+    lastMoveToC: -1,
     turn: 'white',
     moveLog: [],
     status: 'waiting',
@@ -333,6 +343,12 @@ export function playMove(
   const pieceName = CODE_TO_PIECE[cell[1]];
   const captured = state.board[toR][toC];
 
+  // Store move coordinates for animation
+  state.lastMoveFromR = fromR;
+  state.lastMoveFromC = fromC;
+  state.lastMoveToR = toR;
+  state.lastMoveToC = toC;
+
   // Execute raw move
   state.board[toR][toC] = cell;
   state.board[fromR][fromC] = null;
@@ -345,6 +361,9 @@ export function playMove(
       state.board[toR][toC] = `${color}${promo}`;
     }
   }
+
+  // Save pre-gravity board for animation
+  state.preGravityBoard = cloneBoard(state.board);
 
   // Apply gravity
   state.board = applyGravity(state.board);
@@ -397,6 +416,14 @@ export function playMove(
 
 // --- Public state views ---
 
+export interface AnimationData {
+  preGravityBoard: Board | null;
+  lastMoveFromR: number;
+  lastMoveFromC: number;
+  lastMoveToR: number;
+  lastMoveToC: number;
+}
+
 export interface PublicGameState {
   board: Board;
   turn: Player;
@@ -408,6 +435,7 @@ export interface PublicGameState {
   blackClaimed: boolean;
   drawReason: string | null;
   inCheck: boolean;
+  animation: AnimationData;
 }
 
 export function getPlayerView(state: GameState, player: Player): PublicGameState {
@@ -422,6 +450,13 @@ export function getPlayerView(state: GameState, player: Player): PublicGameState
     blackClaimed: state.blackClaimed,
     drawReason: state.drawReason,
     inCheck: isInCheck(state.board, player),
+    animation: {
+      preGravityBoard: state.preGravityBoard,
+      lastMoveFromR: state.lastMoveFromR,
+      lastMoveFromC: state.lastMoveFromC,
+      lastMoveToR: state.lastMoveToR,
+      lastMoveToC: state.lastMoveToC,
+    },
   };
 }
 
@@ -434,6 +469,7 @@ export interface SpectatorViewState {
   whiteClaimed: boolean;
   blackClaimed: boolean;
   drawReason: string | null;
+  animation: AnimationData;
 }
 
 export function getSpectatorView(state: GameState): SpectatorViewState {
@@ -446,5 +482,12 @@ export function getSpectatorView(state: GameState): SpectatorViewState {
     whiteClaimed: state.whiteClaimed,
     blackClaimed: state.blackClaimed,
     drawReason: state.drawReason,
+    animation: {
+      preGravityBoard: state.preGravityBoard,
+      lastMoveFromR: state.lastMoveFromR,
+      lastMoveFromC: state.lastMoveFromC,
+      lastMoveToR: state.lastMoveToR,
+      lastMoveToC: state.lastMoveToC,
+    },
   };
 }

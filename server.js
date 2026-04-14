@@ -160,6 +160,11 @@ function isStalemate(board, player) {
 function createGame() {
   return {
     board: makeStartingBoard(),
+    preGravityBoard: null,
+    lastMoveFromR: -1,
+    lastMoveFromC: -1,
+    lastMoveToR: -1,
+    lastMoveToC: -1,
     turn: 'white',
     moveLog: [],
     status: 'waiting',
@@ -185,6 +190,10 @@ function playMove(state, player, fromR, fromC, toR, toC, promotionPiece) {
   const toSq = indicesToSquare(toR, toC);
   const pieceName = CODE_TO_PIECE[cell[1]];
   const captured = state.board[toR][toC];
+  state.lastMoveFromR = fromR;
+  state.lastMoveFromC = fromC;
+  state.lastMoveToR = toR;
+  state.lastMoveToC = toC;
   state.board[toR][toC] = cell;
   state.board[fromR][fromC] = null;
   if (cell[1] === 'P') {
@@ -193,6 +202,7 @@ function playMove(state, player, fromR, fromC, toR, toC, promotionPiece) {
       state.board[toR][toC] = `${color}${promotionPiece || 'Q'}`;
     }
   }
+  state.preGravityBoard = cloneBoard(state.board);
   state.board = applyGravity(state.board);
   let desc = `${pieceName} ${fromSq}→${toSq}`;
   if (captured) desc += ` ✕ ${CODE_TO_PIECE[captured[1]]}`;
@@ -217,6 +227,16 @@ function playMove(state, player, fromR, fromC, toR, toC, promotionPiece) {
   return { success: true };
 }
 
+function getAnimationData(state) {
+  return {
+    preGravityBoard: state.preGravityBoard,
+    lastMoveFromR: state.lastMoveFromR,
+    lastMoveFromC: state.lastMoveFromC,
+    lastMoveToR: state.lastMoveToR,
+    lastMoveToC: state.lastMoveToC,
+  };
+}
+
 function getPlayerView(state, player) {
   return {
     board: state.board, turn: state.turn, player,
@@ -224,6 +244,7 @@ function getPlayerView(state, player) {
     winner: state.winner, whiteClaimed: state.whiteClaimed,
     blackClaimed: state.blackClaimed, drawReason: state.drawReason,
     inCheck: isInCheck(state.board, player),
+    animation: getAnimationData(state),
   };
 }
 
@@ -233,6 +254,7 @@ function getSpectatorView(state) {
     moveLog: state.moveLog, status: state.status,
     winner: state.winner, whiteClaimed: state.whiteClaimed,
     blackClaimed: state.blackClaimed, drawReason: state.drawReason,
+    animation: getAnimationData(state),
   };
 }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Player, PublicGameState, SpectatorViewState } from '$lib/game';
+  import { onMount } from 'svelte';
+  import type { Player, PublicGameState, SpectatorViewState, Board, AnimationData } from '$lib/game';
   import { CODE_TO_PIECE } from '$lib/game';
   import { getLegalMoves } from '$lib/game';
 
@@ -17,6 +18,19 @@
   let legalMoves: [number, number][] = $state([]);
   let promotionChoice: { fromR: number; fromC: number; toR: number; toC: number } | null = $state(null);
 
+  // Animation state
+  let displayBoard: Board = $state(Array(8).fill(null).map(() => Array(8).fill(null)));
+  let animPhase: 'idle' | 'move' | 'pause' | 'fall' = $state('idle');
+  let animData: AnimationData | null = $state(null);
+  let prevMoveCount = $state(0);
+  let inputLocked = $state(false);
+
+  // Track piece positions for CSS transitions: key = "piece-id", value = {vRow, vCol}
+  // We use a unique ID per board cell based on piece + position
+  type PiecePos = { piece: string; vRow: number; vCol: number; id: string };
+  let piecePositions: PiecePos[] = $state([]);
+  let fallTransitions: Map<string, { fromVRow: number; fromVCol: number; toVRow: number; toVCol: number }> = $state(new Map());
+
   function emit(event: string, data?: any) {
     import('$lib/socket').then(({ getSocket }) => getSocket().emit(event, data));
   }
@@ -24,34 +38,130 @@
   const isMyTurn = $derived(isPlayer && gameState && 'player' in gameState && gameState.turn === gameState.player);
   const legalMoveSet = $derived(new Set(legalMoves.map(([r, c]) => `${r},${c}`)));
 
-  // Board display: rotated 90° clockwise
-  // Visual rows (top to bottom) = files a to h (col 0 to 7) — h at bottom = gravity
-  // Visual columns (left to right) = ranks 1 to 8 (row 7 to 0)
-  // For white: ranks go left(1) to right(8), files go top(a) to bottom(h)
-  // For black: we flip so ranks go left(8) to right(1), files go top(h) to bottom(a)
-
-  // visualRow = file index (0=a at top, 7=h at bottom) for white
-  // visualCol = rank display (0=rank1=row7 at left, 7=rank8=row0 at right) for white
-
-  // Both players always see white on left, h-file at bottom (gravity pulls down)
-  // No board flipping for black — same orientation for everyone
+  // Board coordinate mapping (white always on left, h-file at bottom)
   function visualToBoard(vRow: number, vCol: number): [number, number] {
-    // vRow = file (col in board), vCol = rank from left (row 7-vCol in board)
     const boardRow = 7 - vCol;
     const boardCol = vRow;
     return [boardRow, boardCol];
   }
 
-  // Labels
+  function boardToVisual(boardRow: number, boardCol: number): [number, number] {
+    const vRow = boardCol;
+    const vCol = 7 - boardRow;
+    return [vRow, vCol];
+  }
+
   function getRankLabel(vCol: number): string {
-    return String(vCol + 1); // 1 on left, 8 on right
+    return String(vCol + 1);
   }
 
   function getFileLabel(vRow: number): string {
-    return String.fromCharCode(97 + vRow); // a on top, h on bottom
+    return String.fromCharCode(97 + vRow);
+  }
+
+  // Build piece list from a board
+  function boardToPieces(board: Board): PiecePos[] {
+    const pieces: PiecePos[] = [];
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        if (board[r][c]) {
+          const [vRow, vCol] = boardToVisual(r, c);
+          pieces.push({ piece: board[r][c]!, vRow, vCol, id: `${board[r][c]}-${r}-${c}` });
+        }
+      }
+    }
+    return pieces;
+  }
+
+  // React to gameState changes - handle animation
+  $effect(() => {
+    if (!gameState) return;
+    const gs = gameState;
+    const moveCount = gs.moveLog.length;
+
+    // Check if a new move happened
+    if (moveCount > prevMoveCount && gs.animation?.preGravityBoard && gs.animation.lastMoveFromR >= 0) {
+      prevMoveCount = moveCount;
+      animData = gs.animation;
+      runAnimation(gs.board, gs.animation);
+    } else {
+      // No animation needed (initial state, new game, etc.)
+      prevMoveCount = moveCount;
+      displayBoard = gs.board;
+      piecePositions = boardToPieces(gs.board);
+      fallTransitions = new Map();
+      animPhase = 'idle';
+      inputLocked = false;
+    }
+  });
+
+  async function runAnimation(finalBoard: Board, anim: AnimationData) {
+    inputLocked = true;
+    const preGravBoard = anim.preGravityBoard!;
+
+    // Phase 1: Show pre-gravity board (piece already at target after raw move)
+    // The piece has moved from fromR,fromC to toR,toC
+    animPhase = 'move';
+    displayBoard = preGravBoard;
+    piecePositions = boardToPieces(preGravBoard);
+    fallTransitions = new Map();
+
+    // Phase 2: Pause for 500ms so user sees the raw move
+    await sleep(500);
+
+    // Phase 3: Compute fall transitions (pre-gravity → post-gravity)
+    animPhase = 'fall';
+    const transitions = new Map<string, { fromVRow: number; fromVCol: number; toVRow: number; toVCol: number }>();
+
+    // For each row, pieces shift toward col 7. Match pieces by row + identity.
+    for (let row = 0; row < 8; row++) {
+      // Collect pre-gravity pieces in this row (with their columns)
+      const prePieces: { piece: string; col: number }[] = [];
+      for (let col = 0; col < 8; col++) {
+        if (preGravBoard[row][col]) {
+          prePieces.push({ piece: preGravBoard[row][col]!, col });
+        }
+      }
+      // Collect post-gravity pieces in this row
+      const postPieces: { piece: string; col: number }[] = [];
+      for (let col = 0; col < 8; col++) {
+        if (finalBoard[row][col]) {
+          postPieces.push({ piece: finalBoard[row][col]!, col });
+        }
+      }
+      // Match them 1:1 (same order, same pieces, just shifted)
+      for (let i = 0; i < prePieces.length && i < postPieces.length; i++) {
+        const pre = prePieces[i];
+        const post = postPieces[i];
+        if (pre.col !== post.col) {
+          const [fromVRow, fromVCol] = boardToVisual(row, pre.col);
+          const [toVRow, toVCol] = boardToVisual(row, post.col);
+          const key = `${pre.piece}-${row}-${pre.col}`;
+          transitions.set(key, { fromVRow, fromVCol, toVRow, toVCol });
+        }
+      }
+    }
+
+    fallTransitions = transitions;
+
+    // Show pieces at pre-gravity positions but with CSS transitions to post-gravity
+    // After transition completes, snap to final board
+    await sleep(350);
+
+    // Phase 4: Snap to final
+    displayBoard = finalBoard;
+    piecePositions = boardToPieces(finalBoard);
+    fallTransitions = new Map();
+    animPhase = 'idle';
+    inputLocked = false;
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   function handleSquareClick(vRow: number, vCol: number) {
+    if (inputLocked) return;
     if (!gameState || gameState.status !== 'playing') return;
     if (!isPlayer || !('player' in gameState)) return;
 
@@ -60,11 +170,8 @@
     const [r, c] = visualToBoard(vRow, vCol);
     const cell = ps.board[r][c];
 
-    // Selected piece + legal move target = normal move
     if (selectedSquare && legalMoveSet.has(`${r},${c}`)) {
       const [fromR, fromC] = selectedSquare;
-
-      // Check for pawn promotion
       const piece = ps.board[fromR][fromC];
       if (piece && piece[1] === 'P') {
         const promoRow = color === 'w' ? 0 : 7;
@@ -73,21 +180,18 @@
           return;
         }
       }
-
       emit('move', { player: ps.player, fromR, fromC, toR: r, toC: c });
       selectedSquare = null;
       legalMoves = [];
       return;
     }
 
-    // Click own piece: select it
     if (cell && cell[0] === color && isMyTurn) {
       selectedSquare = [r, c];
       legalMoves = getLegalMoves(ps.board, ps.player, r, c);
       return;
     }
 
-    // Click empty or enemy with no valid action: deselect
     selectedSquare = null;
     legalMoves = [];
   }
@@ -114,7 +218,6 @@
 
   const lastMove = $derived(gameState?.moveLog.length ? gameState.moveLog[gameState.moveLog.length - 1] : null);
 
-  // Convert board indices to square name for last-move highlighting
   function boardToSquareName(r: number, c: number): string {
     const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
     const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
@@ -137,8 +240,10 @@
       </div>
     {:else if gameState?.status === 'waiting'}
       <span class="waiting">Waiting for opponent...</span>
-    {:else if isMyTurn}
+    {:else if isMyTurn && !inputLocked}
       <span class="your-turn">Your turn</span>
+    {:else if inputLocked}
+      <span class="opponent-turn">...</span>
     {:else if gameState}
       <span class="opponent-turn">Opponent's turn</span>
     {/if}
@@ -164,10 +269,10 @@
 
       <!-- The board grid -->
       <div class="board">
+        <!-- Square backgrounds (always visible) -->
         {#each Array(8) as _, vRow}
           {#each Array(8) as _, vCol}
             {@const [r, c] = visualToBoard(vRow, vCol)}
-            {@const cell = gameState?.board[r][c]}
             {@const isLight = isLightSquare(r, c)}
             {@const isSelected = selectedSquare?.[0] === r && selectedSquare?.[1] === c}
             {@const isLegal = legalMoveSet.has(`${r},${c}`)}
@@ -180,26 +285,49 @@
               class:light={isLight}
               class:dark={!isLight}
               class:selected={isSelected}
-              class:legal-target={isLegal}
-              class:last-from={isLastFrom}
-              class:last-to={isLastTo}
+              class:last-from={isLastFrom && animPhase === 'idle'}
+              class:last-to={isLastTo && animPhase === 'idle'}
+              style="grid-row: {vRow + 1}; grid-column: {vCol + 1};"
               onclick={() => handleSquareClick(vRow, vCol)}
             >
-              {#if cell}
-                <img
-                  src={`/pieces/${cell}.svg`}
-                  alt={cell}
-                  class="piece"
-                />
-              {/if}
-              {#if isLegal && !cell}
+              {#if isLegal && !displayBoard[r]?.[c]}
                 <div class="legal-dot"></div>
-              {/if}
-              {#if isLegal && cell}
-                <div class="capture-ring"></div>
               {/if}
             </button>
           {/each}
+        {/each}
+
+        <!-- Piece layer (absolutely positioned, animated) -->
+        {#each piecePositions as pp (pp.id)}
+          {@const fallData = fallTransitions.get(pp.id)}
+          {@const actualVRow = fallData ? fallData.fromVRow : pp.vRow}
+          {@const actualVCol = fallData ? fallData.fromVCol : pp.vCol}
+          {@const targetVRow = fallData ? fallData.toVRow : pp.vRow}
+          {@const targetVCol = fallData ? fallData.toVCol : pp.vCol}
+          {@const [r, c] = visualToBoard(pp.vRow, pp.vCol)}
+          {@const isLegal = legalMoveSet.has(`${r},${c}`)}
+
+          <div
+            class="piece-wrapper"
+            class:falling={animPhase === 'fall' && fallData}
+            style="
+              --from-row: {actualVRow};
+              --from-col: {actualVCol};
+              --to-row: {targetVRow};
+              --to-col: {targetVCol};
+              grid-row: {pp.vRow + 1};
+              grid-column: {pp.vCol + 1};
+            "
+          >
+            <img
+              src={`/pieces/${pp.piece}.svg`}
+              alt={pp.piece}
+              class="piece"
+            />
+            {#if isLegal}
+              <div class="capture-ring"></div>
+            {/if}
+          </div>
         {/each}
       </div>
     </div>
@@ -264,45 +392,18 @@
     min-height: 44px;
   }
 
-  .check-warning {
-    font-size: 0.85rem;
-    color: #fbbf24;
-    font-weight: 700;
-  }
-
-  .your-turn {
-    color: #4ade80;
-    font-weight: 700;
-    font-size: 0.95rem;
-  }
-
-  .opponent-turn {
-    color: #888;
-    font-size: 0.9rem;
-  }
-
-  .waiting {
-    color: #fbbf24;
-    font-size: 0.9rem;
-    animation: pulse 2s infinite;
-  }
+  .check-warning { font-size: 0.85rem; color: #fbbf24; font-weight: 700; }
+  .your-turn { color: #4ade80; font-weight: 700; font-size: 0.95rem; }
+  .opponent-turn { color: #888; font-size: 0.9rem; }
+  .waiting { color: #fbbf24; font-size: 0.9rem; animation: pulse 2s infinite; }
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
   }
 
-  .game-over {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-
-  .winner {
-    font-size: 1.1rem;
-    font-weight: 800;
-    color: #fbbf24;
-  }
+  .game-over { display: flex; align-items: center; gap: 1rem; }
+  .winner { font-size: 1.1rem; font-weight: 800; color: #fbbf24; }
 
   .new-game-btn {
     padding: 6px 16px;
@@ -328,9 +429,7 @@
     margin-bottom: 2px;
   }
 
-  .label-spacer {
-    width: 0;
-  }
+  .label-spacer { width: 0; }
 
   .rank-label {
     flex: 1;
@@ -369,6 +468,7 @@
     border-radius: 4px;
     overflow: hidden;
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+    position: relative;
   }
 
   .square {
@@ -381,15 +481,38 @@
     padding: 0;
     cursor: pointer;
     transition: background-color 0.15s;
+    z-index: 1;
   }
 
   .light { background: #e8dcc8; }
   .dark { background: #a67c52; }
-
   .square.selected { background: #7bc86c !important; }
+  .square.last-from, .square.last-to { background: #cdd26a !important; }
 
-  .square.last-from,
-  .square.last-to { background: #cdd26a !important; }
+  .piece-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  .piece-wrapper.falling {
+    animation: fallDown 300ms ease-in forwards;
+  }
+
+  @keyframes fallDown {
+    from {
+      transform: translate(
+        calc((var(--from-col) - var(--to-col)) * 100%),
+        calc((var(--from-row) - var(--to-row)) * 100%)
+      );
+    }
+    to {
+      transform: translate(0, 0);
+    }
+  }
 
   .piece {
     width: 78%;
@@ -424,16 +547,8 @@
     padding-left: 24px;
   }
 
-  .gravity-arrow {
-    font-size: 1rem;
-    color: #888;
-  }
-
-  .gravity-label {
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    font-weight: 600;
-  }
+  .gravity-arrow { font-size: 1rem; color: #888; }
+  .gravity-label { text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
 
   .promotion-overlay {
     position: fixed;
@@ -453,15 +568,8 @@
     border: 1px solid #333;
   }
 
-  .promotion-dialog p {
-    margin-bottom: 1rem;
-    font-size: 1rem;
-  }
-
-  .promotion-options {
-    display: flex;
-    gap: 0.75rem;
-  }
+  .promotion-dialog p { margin-bottom: 1rem; font-size: 1rem; }
+  .promotion-options { display: flex; gap: 0.75rem; }
 
   .promo-btn {
     padding: 8px;
@@ -470,14 +578,8 @@
     transition: background 0.15s;
   }
 
-  .promo-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .promo-btn img {
-    width: 48px;
-    height: 48px;
-  }
+  .promo-btn:hover { background: rgba(255, 255, 255, 0.2); }
+  .promo-btn img { width: 48px; height: 48px; }
 
   .move-log {
     width: 100%;
