@@ -33,35 +33,22 @@
   // visualRow = file index (0=a at top, 7=h at bottom) for white
   // visualCol = rank display (0=rank1=row7 at left, 7=rank8=row0 at right) for white
 
+  // Both players always see white on left, h-file at bottom (gravity pulls down)
+  // No board flipping for black — same orientation for everyone
   function visualToBoard(vRow: number, vCol: number): [number, number] {
-    if (player === 'white') {
-      // vRow = file (col in board), vCol = rank from left (row 7-vCol in board)
-      const boardRow = 7 - vCol;
-      const boardCol = vRow;
-      return [boardRow, boardCol];
-    } else {
-      // Black: flip both axes
-      const boardRow = vCol;
-      const boardCol = 7 - vRow;
-      return [boardRow, boardCol];
-    }
+    // vRow = file (col in board), vCol = rank from left (row 7-vCol in board)
+    const boardRow = 7 - vCol;
+    const boardCol = vRow;
+    return [boardRow, boardCol];
   }
 
   // Labels
   function getRankLabel(vCol: number): string {
-    if (player === 'white') {
-      return String(vCol + 1); // 1 on left, 8 on right
-    } else {
-      return String(8 - vCol); // 8 on left, 1 on right
-    }
+    return String(vCol + 1); // 1 on left, 8 on right
   }
 
   function getFileLabel(vRow: number): string {
-    if (player === 'white') {
-      return String.fromCharCode(97 + vRow); // a on top, h on bottom
-    } else {
-      return String.fromCharCode(97 + 7 - vRow); // h on top, a on bottom
-    }
+    return String.fromCharCode(97 + vRow); // a on top, h on bottom
   }
 
   function handleSquareClick(vRow: number, vCol: number) {
